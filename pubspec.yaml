@@ -49,6 +49,17 @@ dependencies:
   # builds the app. Lift this pin if something here ever genuinely needs JNI,
   # and install NDK 28.2.13676358 at the same time.
   path_provider_android: ">=2.2.5 <2.3.0"
+  # Pinned below 2.6.0 for the same class of reason as the line above, at the
+  # other end of the platform split. 2.6.0 is where the Darwin implementation
+  # started depending on package:objective_c, which ships a native build hook.
+  # Flutter compiles and runs every build hook in the graph regardless of the
+  # target platform, so an iOS-only package's hook runs during an Android
+  # build — and that compile step invokes the Dart SDK path unquoted, which
+  # fails outright on any Windows machine whose user directory contains a
+  # space. 2.5.1 is the last release with no hook, and path_provider's own
+  # constraint (^2.3.2) allows it. Lift this pin once the hook runner quotes
+  # its paths, or when the project no longer builds on such a machine.
+  path_provider_foundation: ">=2.3.2 <2.6.0"
   http: ^1.6.0
   device_info_plus: ^13.2.0
   exif: ^3.3.0
