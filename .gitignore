@@ -46,3 +46,16 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# --- backend (Python) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Local extraction scratch: artifact bytes materialised for a run, and the
+# development SQLite database. Both are regenerable; neither is evidence.
+backend/.lm-work/
+*.db
+benchmark-report.json
