@@ -3,6 +3,7 @@ import 'package:legal_metrology_capture/models/barcode_scan.dart';
 import 'package:legal_metrology_capture/models/capture_record.dart';
 import 'package:legal_metrology_capture/models/product_session.dart';
 import 'package:legal_metrology_capture/models/quality_report.dart';
+import 'package:legal_metrology_capture/models/capture_context.dart';
 import 'package:legal_metrology_capture/models/surface_step.dart';
 import 'package:legal_metrology_capture/quality/thresholds.dart';
 
@@ -83,7 +84,7 @@ void main() {
         reason: SkipReason.surfaceNotPresent,
         recordedAtUtc: DateTime.utc(2026, 1, 1),
       );
-      expect(product.isComplete, isTrue);
+      expect(product.isCoverageComplete, isTrue);
       expect(product.coverageLabel, '4 of 4 captured');
     });
 
@@ -95,7 +96,81 @@ void main() {
       product.steps.add(
         SurfaceStepState(definition: SurfaceStepDefinition.extraAngle(1)),
       );
+      expect(product.isCoverageComplete, isTrue);
+    });
+
+    test('resolved coverage alone does not complete a package', () {
+      final product = _product();
+      for (final step in product.steps) {
+        _accept(step);
+      }
+      // Every photograph is in and the package is still not done: the
+      // applicability flags are unanswered, and there is no code path that
+      // fills them in on the inspector's behalf.
+      expect(product.isCoverageComplete, isTrue);
+      expect(product.isComplete, isFalse);
+      expect(product.context.missingFields, hasLength(4));
+      expect(product.outstandingWork, hasLength(4));
+    });
+
+    test('declaring the context completes a covered package', () {
+      final product = _product();
+      for (final step in product.steps) {
+        _accept(step);
+      }
+      product.context = product.context.copyWith(
+        saleChannel: SaleChannel.retail,
+        isImported: false,
+        isForRetail: true,
+        isEcommerceListing: false,
+      );
       expect(product.isComplete, isTrue);
+      expect(product.outstandingWork, isEmpty);
+      // The declaration is stamped at the moment the last answer lands.
+      expect(product.context.declaredAtUtc, isNotNull);
+    });
+  });
+
+  group('capture context', () {
+    test('refuses to render an unanswered flag as a contract boolean', () {
+      const partial = CaptureContext(
+        saleChannel: SaleChannel.retail,
+        isImported: true,
+        isForRetail: true,
+        // isEcommerceListing deliberately left unanswered.
+      );
+      expect(partial.isComplete, isFalse);
+      expect(partial.toContractJson, throwsStateError);
+    });
+
+    test('emits the contract shape once fully declared', () {
+      const declared = CaptureContext(
+        saleChannel: SaleChannel.ecommerce,
+        isImported: true,
+        isForRetail: true,
+        isEcommerceListing: true,
+      );
+      expect(declared.toContractJson(), <String, dynamic>{
+        'jurisdiction': <String, dynamic>{'country': 'IN', 'state': null},
+        'sale_channel': 'ECOMMERCE',
+        'is_imported': true,
+        'is_for_retail': true,
+        'is_ecommerce_listing': true,
+      });
+    });
+
+    test('round trips a half-answered declaration through local storage', () {
+      const partial = CaptureContext(
+        saleChannel: SaleChannel.wholesale,
+        isImported: false,
+      );
+      final restored = CaptureContext.fromJson(partial.toJson());
+      expect(restored.saleChannel, SaleChannel.wholesale);
+      expect(restored.isImported, isFalse);
+      // An unanswered question must come back unanswered, not as `false`.
+      expect(restored.isForRetail, isNull);
+      expect(restored.isEcommerceListing, isNull);
+      expect(restored.isComplete, isFalse);
     });
   });
 

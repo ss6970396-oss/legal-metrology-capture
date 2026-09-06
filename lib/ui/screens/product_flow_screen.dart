@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../models/barcode_scan.dart';
 import '../../models/surface_step.dart';
 import '../../state/inspection_controller.dart';
+import '../widgets/context_card.dart';
 import '../widgets/coverage_indicator.dart';
 import '../widgets/quality_badges.dart';
 import '../widgets/skip_step_sheet.dart';
@@ -48,6 +49,8 @@ class ProductFlowScreen extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
         children: <Widget>[
           _IdentificationCard(),
+          const SizedBox(height: 14),
+          const ContextCard(),
           const SizedBox(height: 18),
           Text(
             'Surfaces',
@@ -348,7 +351,12 @@ class _FinishBar extends StatelessWidget {
     if (product == null) return const SizedBox.shrink();
 
     final theme = Theme.of(context);
-    final pending = product.pendingSteps;
+
+    // Outstanding photographs and unanswered context questions are listed
+    // together. To the inspector they are one thing — what is left before this
+    // package is done — and splitting them across two places would let one
+    // hide behind the other.
+    final outstanding = product.outstandingWork;
 
     return SafeArea(
       child: Padding(
@@ -357,19 +365,24 @@ class _FinishBar extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            if (pending.isNotEmpty)
+            if (outstanding.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Text(
-                  'Still to resolve: '
-                  '${pending.map((s) => s.label).join(', ')}',
+                  'Still to resolve: ${outstanding.join(', ')}',
                   style: theme.textTheme.bodySmall,
                 ),
               ),
             FilledButton(
               onPressed: product.isComplete
-                  ? () {
+                  ? () async {
+                      // Request extraction before closing. Ordering matters:
+                      // the job payload is built from the live session, and
+                      // closing first would hand it a package the inspector
+                      // has already navigated away from.
+                      await controller.submitProductForExtraction();
                       controller.closeProductSession();
+                      if (!context.mounted) return;
                       Navigator.of(context).pop();
                     }
                   : null,
@@ -379,8 +392,8 @@ class _FinishBar extends StatelessWidget {
               child: Text(
                 product.isComplete
                     ? 'Finish this package'
-                    : '${pending.length} step'
-                        '${pending.length == 1 ? '' : 's'} left',
+                    : '${outstanding.length} item'
+                        '${outstanding.length == 1 ? '' : 's'} left',
               ),
             ),
           ],

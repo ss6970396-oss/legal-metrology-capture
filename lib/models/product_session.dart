@@ -1,5 +1,6 @@
 import '../core/json_store.dart';
 import 'barcode_scan.dart';
+import 'capture_context.dart';
 import 'surface_step.dart';
 
 /// One package examined within a visit.
@@ -12,6 +13,7 @@ class ProductSession {
     required this.inspectionId,
     required this.startedAtUtc,
     required this.steps,
+    this.context = const CaptureContext(),
     this.identification,
     this.productLabel,
     this.closedAtUtc,
@@ -23,6 +25,13 @@ class ProductSession {
 
   /// The guided sequence for this package, in order.
   final List<SurfaceStepState> steps;
+
+  /// What the inspector declares about how this package was offered for sale.
+  ///
+  /// Declared, not observed. The compliance engine uses it to decide which
+  /// rules apply, so it must be answered by a person rather than defaulted —
+  /// see [CaptureContext].
+  CaptureContext context;
 
   /// Product identity from a barcode. Never compliance evidence — see
   /// [BarcodeScan].
@@ -52,9 +61,24 @@ class ProductSession {
       '$resolvedRequiredCount of $requiredCount captured';
 
   /// A product session is only complete when every required step has either a
-  /// capture the inspector accepted or a recorded reason it has none. There is
-  /// no path that marks it complete with a step still pending.
-  bool get isComplete => requiredSteps.every((s) => s.status.isResolved);
+  /// capture the inspector accepted or a recorded reason it has none, and the
+  /// commercial context has been declared. There is no path that marks it
+  /// complete with a step still pending or an applicability flag unanswered.
+  bool get isComplete =>
+      context.isComplete && requiredSteps.every((s) => s.status.isResolved);
+
+  /// Coverage alone, ignoring the context declaration. The capture flow uses
+  /// this to decide when to stop asking for photographs; [isComplete] is what
+  /// gates submission.
+  bool get isCoverageComplete =>
+      requiredSteps.every((s) => s.status.isResolved);
+
+  /// What still stands between this package and a submittable session, in the
+  /// order the flow should ask for it.
+  List<String> get outstandingWork => <String>[
+        for (final step in pendingSteps) 'Capture ${step.label}',
+        ...context.missingFields,
+      ];
 
   List<SurfaceStepState> get pendingSteps =>
       requiredSteps.where((s) => !s.status.isResolved).toList();
@@ -108,6 +132,7 @@ class ProductSession {
           'label': coverageLabel,
         },
         'manualReviewRequired': hasManualReviewFlags,
+        'context': context.toJson(),
         'identification': identification?.toJson(),
         'steps': steps.map((s) => s.toJson()).toList(),
       };
@@ -119,6 +144,10 @@ class ProductSession {
       productSessionId: json['productSessionId'] as String? ?? '',
       inspectionId: json['inspectionId'] as String? ?? '',
       productLabel: json['productLabel'] as String?,
+      context: CaptureContext.fromJson(
+        (json['context'] as Map?)?.cast<String, dynamic>() ??
+            const <String, dynamic>{},
+      ),
       startedAtUtc: decodeTime(json['startedAtUtc']),
       closedAtUtc: decodeTimeOrNull(json['closedAtUtc']),
       identification: identificationJson == null

@@ -5,24 +5,36 @@ import 'package:http/http.dart' as http;
 
 import 'upload_transport.dart';
 
-/// Posts one capture to an HTTP endpoint as `multipart/form-data`.
+/// Talks to the extraction backend over HTTP.
 ///
 /// Wire format, so the server side has something concrete to implement
 /// against:
 ///
 /// ```
-/// POST {baseUri}/captures
-/// Content-Type: multipart/form-data
+/// POST {baseUri}/capture-sessions
+/// Content-Type: application/json
+///   the capture-session envelope (context, client, package id)
 ///
+/// POST {baseUri}/artifacts
+/// Content-Type: multipart/form-data
 ///   image     — the JPEG, exactly the bytes the camera produced
-///   metadata  — the JSON bundle, as an application/json part
+///   metadata  — the per-artifact JSON bundle, as an application/json part
+///
+/// POST {baseUri}/extraction-jobs
+/// Content-Type: application/json
+///   the job payload (session id, image manifest, coverage)
 /// ```
 ///
-/// Two headers carry identity out of band so a server can deduplicate without
-/// parsing the body: `X-Capture-Id` and `X-Inspection-Id`. Retries reuse the
-/// same capture ID, which makes the request idempotent as long as the server
-/// keys on it — and it should, because the client-minted ID is the primary key
-/// by design.
+/// Identity travels in headers as well as the body so a server can deduplicate
+/// without parsing anything: `X-Capture-Session-Id` on every request, plus
+/// `X-Artifact-Id` on an artifact post. Retries reuse the same identifiers,
+/// which makes every one of these requests idempotent as long as the server
+/// keys on them — and it should, because the client-minted IDs are the primary
+/// keys by design.
+///
+/// `GET /extraction-jobs/{id}/snapshot` is part of the backend contract but is
+/// deliberately not implemented here. See [UploadTransport.submitExtractionJob]
+/// for why the capture app does not read snapshots back.
 class HttpMultipartUploadTransport implements UploadTransport {
   HttpMultipartUploadTransport({
     required this.baseUri,
@@ -41,18 +53,80 @@ class HttpMultipartUploadTransport implements UploadTransport {
   final Duration timeout;
   final http.Client _client;
 
-  Uri get _endpoint => baseUri.replace(
+  Uri _endpoint(String segment) => baseUri.replace(
         pathSegments: <String>[
           ...baseUri.pathSegments.where((s) => s.isNotEmpty),
-          'captures',
+          segment,
         ],
       );
 
   @override
-  String get description => 'HTTP multipart → $_endpoint';
+  String get description => 'Extraction API → ${_endpoint('...')}';
+
+  Map<String, String> _headers({
+    String? captureSessionId,
+    String? artifactId,
+    String? contentType,
+  }) {
+    final headers = <String, String>{};
+    final token = authorizationToken;
+    if (token != null) headers['Authorization'] = 'Bearer $token';
+    if (contentType != null) headers['Content-Type'] = contentType;
+    if (captureSessionId != null) {
+      headers['X-Capture-Session-Id'] = captureSessionId;
+    }
+    if (artifactId != null) headers['X-Artifact-Id'] = artifactId;
+    return headers;
+  }
 
   @override
-  Future<UploadOutcome> upload({
+  Future<UploadOutcome> createCaptureSession(
+    Map<String, dynamic> payload,
+  ) =>
+      _postJson(
+        _endpoint('capture-sessions'),
+        payload,
+        captureSessionId: '${payload['capture_session_id'] ?? ''}',
+      );
+
+  @override
+  Future<UploadOutcome> submitExtractionJob(Map<String, dynamic> payload) =>
+      _postJson(
+        _endpoint('extraction-jobs'),
+        payload,
+        captureSessionId: '${payload['capture_session_id'] ?? ''}',
+      );
+
+  Future<UploadOutcome> _postJson(
+    Uri endpoint,
+    Map<String, dynamic> payload, {
+    required String captureSessionId,
+  }) async {
+    try {
+      final response = await _client
+          .post(
+            endpoint,
+            headers: _headers(
+              captureSessionId: captureSessionId,
+              contentType: 'application/json; charset=utf-8',
+            ),
+            body: jsonEncode(payload),
+          )
+          .timeout(timeout);
+      return _interpret(response);
+    } on SocketException catch (error) {
+      return UploadRetryable(
+        'No network connection (${error.osError?.message ?? error.message}).',
+      );
+    } on http.ClientException catch (error) {
+      return UploadRetryable('Connection failed: ${error.message}');
+    } on Object catch (error) {
+      return UploadRetryable('Request failed: $error');
+    }
+  }
+
+  @override
+  Future<UploadOutcome> uploadArtifact({
     required File image,
     required Map<String, dynamic> metadata,
   }) async {
@@ -66,15 +140,14 @@ class HttpMultipartUploadTransport implements UploadTransport {
 
     final ids = (metadata['ids'] as Map?)?.cast<String, dynamic>() ??
         const <String, dynamic>{};
+    final artifactId = '${ids['artifactId'] ?? ''}';
+    final sessionId = '${ids['captureSessionId'] ?? ''}';
 
     try {
-      final request = http.MultipartRequest('POST', _endpoint)
-        ..headers.addAll(<String, String>{
-          if (authorizationToken != null)
-            'Authorization': 'Bearer $authorizationToken',
-          'X-Capture-Id': '${ids['captureId'] ?? ''}',
-          'X-Inspection-Id': '${ids['inspectionId'] ?? ''}',
-        })
+      final request = http.MultipartRequest('POST', _endpoint('artifacts'))
+        ..headers.addAll(
+          _headers(captureSessionId: sessionId, artifactId: artifactId),
+        )
         ..files.add(
           await http.MultipartFile.fromPath(
             'image',
@@ -96,7 +169,9 @@ class HttpMultipartUploadTransport implements UploadTransport {
     } on SocketException catch (error) {
       // No network. The expected case out in the field, and squarely
       // retryable — this is exactly why the queue exists.
-      return UploadRetryable('No network connection (${error.osError?.message ?? error.message}).');
+      return UploadRetryable(
+        'No network connection (${error.osError?.message ?? error.message}).',
+      );
     } on http.ClientException catch (error) {
       return UploadRetryable('Connection failed: ${error.message}');
     } on Object catch (error) {
@@ -118,6 +193,14 @@ class HttpMultipartUploadTransport implements UploadTransport {
         // A 2xx with an unparseable body still means the server took it.
       }
       return UploadSucceeded(serverReference: reference);
+    }
+
+    // A conflict is what an idempotent retry looks like from the server side:
+    // the resource is already there because a previous attempt landed and the
+    // response never reached the device. That is a success for our purposes —
+    // the evidence is where it needs to be.
+    if (status == 409) {
+      return const UploadSucceeded(serverReference: null);
     }
 
     // Rate limiting and request timeouts are explicitly worth retrying even

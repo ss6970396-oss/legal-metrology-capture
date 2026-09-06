@@ -90,7 +90,7 @@ class _TaskTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final queue = InspectionScope.of(context).uploadQueue;
     final theme = Theme.of(context);
-    final surface = (task.metadata['surface'] as Map?)?['surfaceLabel'];
+    final surface = task.label;
 
     return ListTile(
       leading: Icon(
@@ -103,7 +103,7 @@ class _TaskTile extends StatelessWidget {
         color: _colour(context),
       ),
       title: Text(
-        '${surface ?? 'Capture'} · ${task.status.label}',
+        '$surface · ${task.status.label}',
         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
       ),
       subtitle: Column(

@@ -105,26 +105,134 @@ class UploadQueue extends ChangeNotifier {
     _scheduleNext();
   }
 
-  Future<UploadTask> enqueue({
+  /// Opens a package's capture session on the server.
+  ///
+  /// Enqueued once, when the inspector finishes declaring the package context.
+  /// A second call for a package that already has a session task is ignored
+  /// rather than duplicated — the inspector may revise a context answer, and
+  /// that must not produce two sessions for one package.
+  Future<UploadTask?> enqueueCaptureSession({
+    required String inspectionId,
+    required String productSessionId,
+    required Map<String, dynamic> payload,
+  }) async {
+    final existing = _tasks.any(
+      (t) =>
+          t.kind == UploadTaskKind.captureSession &&
+          t.productSessionId == productSessionId,
+    );
+    if (existing) return null;
+
+    return _add(
+      UploadTask(
+        taskId: Ids.uploadTask(),
+        kind: UploadTaskKind.captureSession,
+        inspectionId: inspectionId,
+        productSessionId: productSessionId,
+        payload: payload,
+        createdAtUtc: DateTime.now().toUtc(),
+        nextAttemptAtUtc: DateTime.now().toUtc(),
+      ),
+    );
+  }
+
+  /// Queues one accepted image.
+  Future<UploadTask> enqueueArtifact({
     required CaptureRecord capture,
     required Map<String, dynamic> metadata,
+  }) =>
+      _add(
+        UploadTask(
+          taskId: Ids.uploadTask(),
+          kind: UploadTaskKind.artifact,
+          captureId: capture.captureId,
+          inspectionId: capture.inspectionId,
+          productSessionId: capture.productSessionId,
+          localPath: capture.localPath,
+          payload: metadata,
+          createdAtUtc: DateTime.now().toUtc(),
+          nextAttemptAtUtc: DateTime.now().toUtc(),
+        ),
+      );
+
+  /// Requests extraction over a package's uploaded artifacts.
+  ///
+  /// Any previous, still-pending job task for the package is dropped first.
+  /// A package can be closed, reopened and extended with another surface, and
+  /// what should reach the resolver is one request describing the final set —
+  /// not one request per time the inspector pressed finish.
+  Future<UploadTask> enqueueExtractionJob({
+    required String inspectionId,
+    required String productSessionId,
+    required Map<String, dynamic> payload,
   }) async {
-    final task = UploadTask(
-      taskId: Ids.uploadTask(),
-      captureId: capture.captureId,
-      inspectionId: capture.inspectionId,
-      productSessionId: capture.productSessionId,
-      localPath: capture.localPath,
-      metadata: metadata,
-      createdAtUtc: DateTime.now().toUtc(),
-      nextAttemptAtUtc: DateTime.now().toUtc(),
+    _tasks.removeWhere(
+      (t) =>
+          t.kind == UploadTaskKind.extractionJob &&
+          t.productSessionId == productSessionId &&
+          !t.status.isTerminal,
     );
+
+    return _add(
+      UploadTask(
+        taskId: Ids.uploadTask(),
+        kind: UploadTaskKind.extractionJob,
+        inspectionId: inspectionId,
+        productSessionId: productSessionId,
+        payload: payload,
+        createdAtUtc: DateTime.now().toUtc(),
+        nextAttemptAtUtc: DateTime.now().toUtc(),
+      ),
+    );
+  }
+
+  Future<UploadTask> _add(UploadTask task) async {
     _tasks.add(task);
     await _persist();
     notifyListeners();
     _scheduleNext();
     return task;
   }
+
+  /// Whether every step the contract requires before [task] has landed.
+  ///
+  /// This is the ordering guarantee, and it is checked at drain time rather
+  /// than fixed at enqueue time on purpose: a prerequisite can fail, back off
+  /// and succeed on a later attempt, and the dependent task should become
+  /// eligible exactly then without anyone rescheduling it.
+  ///
+  /// A permanently failed prerequisite leaves its dependents blocked and
+  /// visible. That is the intended outcome — extracting a package whose
+  /// session was rejected would attribute images to nothing.
+  bool _prerequisitesMet(UploadTask task) {
+    switch (task.kind) {
+      case UploadTaskKind.captureSession:
+        return true;
+
+      case UploadTaskKind.artifact:
+        return _tasks.every(
+          (other) =>
+              other.kind != UploadTaskKind.captureSession ||
+              other.productSessionId != task.productSessionId ||
+              other.status == UploadStatus.succeeded,
+        );
+
+      case UploadTaskKind.extractionJob:
+        return _tasks.every(
+          (other) =>
+              other.productSessionId != task.productSessionId ||
+              other.kind == UploadTaskKind.extractionJob ||
+              other.status == UploadStatus.succeeded,
+        );
+    }
+  }
+
+  /// Tasks held back by an unmet prerequisite rather than by their own
+  /// backoff. Surfaced on the queue screen so a blocked package reads as
+  /// blocked rather than as mysteriously idle.
+  List<UploadTask> get blockedTasks => _tasks
+      .where((t) => t.status == UploadStatus.queued && !_prerequisitesMet(t))
+      .toList();
 
   /// Inspector-triggered nudge from the queue screen: clears the backoff wait
   /// and, for a permanently failed task, gives it one more go.
@@ -167,6 +275,7 @@ class UploadQueue extends ChangeNotifier {
     Duration? soonest;
     for (final task in _tasks) {
       if (task.status != UploadStatus.queued) continue;
+      if (!_prerequisitesMet(task)) continue;
       final next = task.nextAttemptAtUtc ?? now;
       final wait = next.isAfter(now) ? next.difference(now) : Duration.zero;
       if (soonest == null || wait < soonest) soonest = wait;
@@ -187,10 +296,12 @@ class UploadQueue extends ChangeNotifier {
         final now = DateTime.now().toUtc();
         UploadTask? due;
         for (final task in _tasks) {
-          if (task.isDue(now)) {
-            due = task;
-            break;
-          }
+          if (!task.isDue(now)) continue;
+          if (!_prerequisitesMet(task)) continue;
+          // Contract order wins over queue order. Artifacts for a package
+          // whose session is already open should not wait behind a session
+          // being opened for a package the inspector has only just started.
+          if (due == null || task.kind.order < due.kind.order) due = task;
         }
         if (due == null) break;
         await _attempt(due);
@@ -207,10 +318,16 @@ class UploadQueue extends ChangeNotifier {
     notifyListeners();
     await _persist();
 
-    final outcome = await transport.upload(
-      image: File(task.localPath),
-      metadata: task.metadata,
-    );
+    final outcome = switch (task.kind) {
+      UploadTaskKind.captureSession =>
+        await transport.createCaptureSession(task.payload),
+      UploadTaskKind.artifact => await transport.uploadArtifact(
+          image: File(task.localPath),
+          metadata: task.payload,
+        ),
+      UploadTaskKind.extractionJob =>
+        await transport.submitExtractionJob(task.payload),
+    };
 
     switch (outcome) {
       case UploadSucceeded(:final serverReference):
