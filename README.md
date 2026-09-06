@@ -43,7 +43,7 @@ session before its artifacts, every artifact before extraction.
 
 ```bash
 flutter test && flutter analyze          # 21 tests
-cd backend && pip install -e ".[dev]" && pytest   # 157 tests
+cd backend && pip install -e ".[dev]" && python -m pytest   # 160 tests
 ```
 
 ## Two design rules worth knowing before reading the code

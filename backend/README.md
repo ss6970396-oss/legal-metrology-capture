@@ -16,9 +16,9 @@ state, not a package's compliance.
 
 ```bash
 cd backend
-pip install -e ".[dev]"      # contract layer + tests, no heavy engines
-pytest                        # 160 tests, ~9s, no external services
-python scripts/demo.py        # see a real snapshot come out of the pipeline
+pip install -e ".[dev]"           # contract layer + tests, no heavy engines
+python -m pytest                   # 160 tests, ~9s, no external services
+python scripts/demo.py             # see a real snapshot come out of the pipeline
 ```
 
 The base install deliberately excludes PaddleOCR and OpenCV. The contract rules
@@ -42,7 +42,7 @@ after recognition is the production code path.
 
 ```bash
 pip install -e ".[cv,tesseract]"   # image diagnostics + the baseline OCR
-uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload
 open http://localhost:8000/docs    # interactive OpenAPI
 curl localhost:8000/v1/health
 ```
