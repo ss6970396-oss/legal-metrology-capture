@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/widgets.dart';
 
@@ -9,12 +10,14 @@ import '../core/device_identity.dart';
 import '../core/ids.dart';
 import '../core/json_store.dart';
 import '../models/barcode_scan.dart';
+import '../models/capture_context.dart';
 import '../models/capture_record.dart';
 import '../models/inspection_session.dart';
 import '../models/product_session.dart';
 import '../models/quality_report.dart';
 import '../models/surface_step.dart';
 import '../quality/thresholds.dart';
+import '../upload/extraction_contract.dart';
 import '../upload/metadata_bundle.dart';
 import '../upload/upload_queue.dart';
 import '../upload/upload_transport.dart';
@@ -28,6 +31,7 @@ import '../upload/upload_transport.dart';
 class InspectionController extends ChangeNotifier {
   InspectionController({
     required this.uploadQueue,
+    required this.client,
     CameraService? cameraService,
     CaptureService? captureService,
     this.store = const JsonStore(),
@@ -37,6 +41,12 @@ class InspectionController extends ChangeNotifier {
   }
 
   final UploadQueue uploadQueue;
+
+  /// Identifies this app build to the extraction backend. Injected rather than
+  /// read from a global so a test can state a client without a platform
+  /// channel.
+  final ClientDescriptor client;
+
   final CameraService cameraService;
   final JsonStore store;
   late final CaptureService _captureService;
@@ -64,8 +74,29 @@ class InspectionController extends ChangeNotifier {
     await queue.load();
     queue.start();
 
-    return InspectionController(uploadQueue: queue);
+    final device = DeviceIdentity.current;
+    return InspectionController(
+      uploadQueue: queue,
+      client: ClientDescriptor(
+        platform: Platform.isAndroid
+            ? 'android'
+            : Platform.isIOS
+                ? 'ios'
+                : Platform.operatingSystem,
+        appVersion: appVersion,
+        deviceModel: device.model,
+      ),
+    );
   }
+
+  /// The build identifier reported to the backend.
+  ///
+  /// Hard-coded rather than read from the package info at runtime: an
+  /// extraction run has to be reproducible against the client that produced
+  /// it, and a version string that silently tracks whatever binary is
+  /// installed is not something a later investigator can pin down. Bump it
+  /// with the version in pubspec.yaml.
+  static const String appVersion = '1.0.0+1';
 
   // --- Session lifecycle -------------------------------------------------
 
@@ -132,6 +163,73 @@ class InspectionController extends ChangeNotifier {
     _product?.productLabel = value.trim().isEmpty ? null : value.trim();
     notifyListeners();
     unawaited(_persist());
+  }
+
+  // --- Declared commercial context ---------------------------------------
+
+  /// Records one of the inspector's context answers.
+  ///
+  /// Every argument is nullable and null means "leave this one alone", so the
+  /// form can update a single answer without restating the others. Once the
+  /// last answer lands the capture session is opened on the server — see
+  /// [_openCaptureSessionIfReady].
+  Future<void> updateContext({
+    Jurisdiction? jurisdiction,
+    SaleChannel? saleChannel,
+    bool? isImported,
+    bool? isForRetail,
+    bool? isEcommerceListing,
+  }) async {
+    final product = _requireProduct();
+    product.context = product.context.copyWith(
+      jurisdiction: jurisdiction,
+      saleChannel: saleChannel,
+      isImported: isImported,
+      isForRetail: isForRetail,
+      isEcommerceListing: isEcommerceListing,
+    );
+    notifyListeners();
+    await _persist();
+    await _openCaptureSessionIfReady(product);
+  }
+
+  /// Queues the capture session once the context is fully declared.
+  ///
+  /// Called after every context change rather than once at the end, because
+  /// the inspector may answer the questions in any order and there is no
+  /// single moment that is obviously "the end". The queue itself drops the
+  /// duplicate calls this produces.
+  Future<void> _openCaptureSessionIfReady(ProductSession product) async {
+    if (!product.context.isComplete) return;
+    await uploadQueue.enqueueCaptureSession(
+      inspectionId: product.inspectionId,
+      productSessionId: product.productSessionId,
+      payload: ExtractionContract.captureSession(
+        product: product,
+        client: client,
+      ),
+    );
+  }
+
+  /// Asks the backend to extract facts from this package's images.
+  ///
+  /// Refuses while anything is outstanding. A package is submitted once its
+  /// coverage is resolved and its context declared; submitting earlier would
+  /// hand the resolver a partial set and invite it to resolve a field to
+  /// UNKNOWN on evidence that was merely not taken yet.
+  Future<bool> submitProductForExtraction() async {
+    final product = _requireProduct();
+    if (!product.isComplete) return false;
+
+    await uploadQueue.enqueueExtractionJob(
+      inspectionId: product.inspectionId,
+      productSessionId: product.productSessionId,
+      payload: ExtractionContract.extractionJob(
+        product: product,
+        client: client,
+      ),
+    );
+    return true;
   }
 
   // --- Capture -----------------------------------------------------------
@@ -204,7 +302,7 @@ class InspectionController extends ChangeNotifier {
     notifyListeners();
     await _persist();
 
-    await uploadQueue.enqueue(
+    await uploadQueue.enqueueArtifact(
       capture: accepted,
       metadata: MetadataBundle.build(
         inspection: inspection,

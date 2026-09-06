@@ -94,6 +94,13 @@ class QualityThresholds {
   /// readable declaration text at all.
   static const int ocrMinimumLines = 3;
 
+  /// Overlap, as a fraction of the smaller bounding box, above which two line
+  /// detections from different script recognizers are treated as the same
+  /// printed line. Bilingual panels are read by both the Latin and Devanagari
+  /// models, and digits and brand text come back from both; counting them
+  /// twice would inflate the line count and distort the legible fraction.
+  static const double ocrDuplicateLineOverlap = 0.60;
+
   // --- Retake policy. ----------------------------------------------------
   /// Failed attempts allowed before the inspector may proceed with the
   /// surface flagged for manual review.

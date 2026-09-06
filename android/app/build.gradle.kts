@@ -49,6 +49,24 @@ android {
     }
 }
 
+dependencies {
+    // Devanagari text recognition, required for Hindi and Marathi declarations
+    // on Indian retail packaging.
+    //
+    // This has to be declared here, in the app, and not only in the plugin.
+    // google_mlkit_text_recognition lists every non-Latin script as
+    // `compileOnly`, so the plugin compiles against the Devanagari recognizer
+    // but ships no implementation of it. Without this line the Latin path
+    // works, `TextRecognitionScript.devanagiri` compiles, and the app then
+    // dies with NoClassDefFoundError the first time an inspector points it at
+    // a Hindi panel — at runtime, in the field, not at build time here.
+    //
+    // Keep the version aligned with the plugin's own declaration
+    // (`text-recognition:16.0.1`); a mismatch between the base recognizer and
+    // a script model is not a supported combination.
+    implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17

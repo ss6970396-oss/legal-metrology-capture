@@ -3,6 +3,7 @@ import '../models/capture_record.dart';
 import '../models/inspection_session.dart';
 import '../models/product_session.dart';
 import '../models/surface_step.dart';
+import 'extraction_contract.dart';
 
 /// Builds the metadata that travels with every uploaded image.
 ///
@@ -15,7 +16,7 @@ import '../models/surface_step.dart';
 class MetadataBundle {
   const MetadataBundle._();
 
-  static const String schemaVersion = 'lm-capture-metadata/1.0';
+  static const String schemaVersion = 'lm-capture-metadata/1.1';
 
   static Map<String, dynamic> build({
     required InspectionSession inspection,
@@ -27,10 +28,20 @@ class MetadataBundle {
       'schemaVersion': schemaVersion,
 
       // Nested session identity, stamped on every image.
+      //
+      // Both vocabularies appear here, deliberately. The bare UUIDs are what
+      // the device wrote into its own evidence tree and what a reviewer will
+      // find on disk; the prefixed forms are what the extraction contract and
+      // the fact provenance refer to. Carrying both means neither side has to
+      // reconstruct the other's identifier from a naming convention.
       'ids': <String, dynamic>{
         'inspectionId': capture.inspectionId,
         'productSessionId': capture.productSessionId,
         'captureId': capture.captureId,
+        'captureSessionId':
+            ExtractionContract.captureSessionId(capture.productSessionId),
+        'packageId': ExtractionContract.packageId(capture.productSessionId),
+        'artifactId': ExtractionContract.artifactId(capture.captureId),
         'scheme': 'uuid-v4-client-generated',
         // The device is the origin of these identifiers. Evidence already
         // written to local storage references them, so a server-side reissue
@@ -53,9 +64,22 @@ class MetadataBundle {
           'requiredSteps': product.requiredCount,
           'resolvedSteps': product.resolvedRequiredCount,
           'label': product.coverageLabel,
-          'complete': product.isComplete,
+          'complete': product.isCoverageComplete,
         },
       },
+
+      // The declared commercial context, repeated on every artifact.
+      //
+      // It is already on the capture session, so this is redundant on the
+      // wire — and that redundancy is the point. An artifact and its bundle
+      // have to be sufficient on their own, and an image whose applicability
+      // context can only be recovered by joining against another record is
+      // not sufficient on its own. Stored in the local shape rather than the
+      // contract shape because a bundle is written the moment a capture is
+      // accepted, which can precede the inspector answering the last context
+      // question — and a half-answered context must serialise as half
+      // answered rather than refusing to serialise at all.
+      'context': product.context.toJson(),
 
       'surface': <String, dynamic>{
         'surfaceId': capture.surfaceId,

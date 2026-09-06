@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -6,8 +7,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:legal_metrology_capture/core/app_paths.dart';
 import 'package:legal_metrology_capture/core/device_identity.dart';
 import 'package:legal_metrology_capture/main.dart';
+import 'package:legal_metrology_capture/models/capture_context.dart';
 import 'package:legal_metrology_capture/models/surface_step.dart';
 import 'package:legal_metrology_capture/state/inspection_controller.dart';
+import 'package:legal_metrology_capture/upload/extraction_contract.dart';
 import 'package:legal_metrology_capture/upload/upload_queue.dart';
 import 'package:legal_metrology_capture/upload/upload_transport.dart';
 
@@ -20,6 +23,29 @@ import 'package:legal_metrology_capture/upload/upload_transport.dart';
 /// step is resolved. The camera is the one piece a host machine cannot stand
 /// in for, so this test resolves the surfaces the other way — by recording a
 /// reason — which is a path a real inspection uses too.
+/// Stands in for the real build descriptor. The values are arbitrary; what
+/// matters is that a controller can be built without a platform channel.
+const ClientDescriptor testClient = ClientDescriptor(
+  platform: 'android',
+  appVersion: 'test',
+  deviceModel: 'test-device',
+);
+
+/// Answers every context question the way an inspector would for an ordinary
+/// domestic retail package.
+///
+/// Called explicitly in each test rather than defaulted in the model, which is
+/// the point of the design: there is no path that reaches a complete package
+/// without someone having answered these.
+Future<void> declareRetailContext(InspectionController controller) async {
+  await controller.updateContext(
+    saleChannel: SaleChannel.retail,
+    isImported: false,
+    isForRetail: true,
+    isEcommerceListing: false,
+  );
+}
+
 void main() {
   late Directory sandbox;
 
@@ -60,7 +86,10 @@ void main() {
         transport: FakeUploadTransport(latency: Duration.zero),
       );
       await queue.load();
-      controller = InspectionController(uploadQueue: queue);
+      controller = InspectionController(
+        uploadQueue: queue,
+        client: testClient,
+      );
     });
     addTearDown(controller.dispose);
 
@@ -97,8 +126,9 @@ void main() {
 
     // 4. Nothing is complete while steps are pending — the finish button is
     //    disabled and says how many are left.
-    expect(find.text('4 steps left'), findsOneWidget);
-    expect(_finishButton(tester, '4 steps left').onPressed, isNull);
+    // Four surfaces plus four unanswered context questions.
+    expect(find.text('8 items left'), findsOneWidget);
+    expect(_finishButton(tester, '8 items left').onPressed, isNull);
 
     // 5. Resolve each surface by recording why it has no photograph.
     for (var i = 0; i < 4; i++) {
@@ -126,13 +156,32 @@ void main() {
       expect(find.text('${i + 1} of 4 captured'), findsOneWidget);
     }
 
-    // 6. Every required step resolved: the package is complete and the finish
-    //    button is live.
+    // 6. Coverage is resolved, but the package is NOT complete: the context
+    //    questions are unanswered and the finish button stays disabled. This
+    //    is the guarantee that an applicability flag is never defaulted.
+    expect(product.isCoverageComplete, isTrue);
+    expect(product.isComplete, isFalse);
+    expect(product.context.missingFields, hasLength(4));
+    expect(find.text('4 items left'), findsOneWidget);
+    expect(_finishButton(tester, '4 items left').onPressed, isNull);
+
+    // 7. Declaring the context is what completes the package.
+    //
+    // Deliberately not awaited. The controller awaits its persistence chain,
+    // and that chain already holds links created by the skip taps above —
+    // real file writes issued inside the widget tester's fake-async zone,
+    // which only completes when the clock is pumped. Awaiting from here would
+    // wait on the pump while holding the pump. The state change and the
+    // listener notification are synchronous, so pumping is all the assertions
+    // below need.
+    unawaited(declareRetailContext(controller));
+    await tester.pumpAndSettle();
+
     expect(product.isComplete, isTrue);
     expect(find.text('Finish this package'), findsOneWidget);
     expect(_finishButton(tester, 'Finish this package').onPressed, isNotNull);
 
-    // 7. Finishing returns to the visit, which now lists the package.
+    // 8. Finishing returns to the visit, which now lists the package.
     await tester.tap(find.text('Finish this package'));
     await tester.pumpAndSettle();
 
@@ -147,7 +196,10 @@ void main() {
       transport: FakeUploadTransport(latency: Duration.zero),
     );
     await queue.load();
-    final controller = InspectionController(uploadQueue: queue);
+    final controller = InspectionController(
+      uploadQueue: queue,
+      client: testClient,
+    );
     addTearDown(controller.dispose);
 
     final inspection = controller.startInspection(premisesLabel: 'Test shop');
@@ -158,6 +210,7 @@ void main() {
         reason: SkipReason.packageNotAccessible,
       );
     }
+    await declareRetailContext(controller);
 
     final manifest =
         AppPaths.instance.inspectionManifest(inspection.inspectionId);
