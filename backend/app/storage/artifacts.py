@@ -90,7 +90,13 @@ class FilesystemArtifactStore:
     """
 
     def __init__(self, root: Path) -> None:
-        self.root = Path(root)
+        # Resolved, not just wrapped: the stored URI is produced with
+        # Path.as_uri(), which raises on a relative path, and the configured
+        # work dir is relative by default (LM_WORK_DIR, "./.lm-work"). Without
+        # this every put() fails with "relative paths can't be expressed as
+        # file URIs" — and only when a real artifact arrives, since the tests
+        # hand this a tmp_path that is already absolute.
+        self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path_for(self, artifact_id: str, sha256: str) -> Path:

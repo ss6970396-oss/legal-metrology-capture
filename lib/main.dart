@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'state/inspection_controller.dart';
 import 'ui/screens/home_screen.dart';
-import 'upload/upload_transport.dart';
+import 'upload/upload_destination.dart';
 
 /// Legal Metrology package-inspection capture module.
 ///
@@ -10,27 +10,18 @@ import 'upload/upload_transport.dart';
 /// session identity, guided capture of the package faces, on-device quality
 /// checks, barcode identification, and a durable upload queue.
 ///
-/// The upload destination is chosen here and nowhere else. It ships pointed at
-/// [FakeUploadTransport] — a local stub that exercises the queue, its retries
-/// and its backoff without sending anything anywhere. Swap in
-/// [HttpMultipartUploadTransport] with a base URI when the evidence API
-/// exists; nothing else in the module changes, and anything already queued
-/// against the stub will be re-sent to the real endpoint.
+/// The upload destination is chosen in one place — [UploadDestination], which
+/// reads it from the build environment. It ships pointed at the extraction
+/// backend over HTTP; passing `--dart-define=EVIDENCE_API_BASE_URL=stub`
+/// substitutes the local stub that exercises the queue, its retries and its
+/// backoff without sending anything anywhere. Nothing else in the module
+/// changes either way, and anything already queued against one destination is
+/// re-sent to the next — queued tasks are transport-agnostic.
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final controller = await InspectionController.bootstrap(
-    // To point at a real backend:
-    //
-    //   transport: HttpMultipartUploadTransport(
-    //     baseUri: Uri.parse('https://evidence.example.gov/api/v1'),
-    //     authorizationToken: '…',
-    //   ),
-    transport: FakeUploadTransport(
-      // A non-zero failure rate makes the retry and backoff path visible
-      // during development rather than theoretical.
-      failureRate: 0.25,
-    ),
+    transport: UploadDestination.create(),
   );
 
   runApp(CaptureApp(controller: controller));

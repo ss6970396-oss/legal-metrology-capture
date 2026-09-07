@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/upload_task.dart';
 import '../../state/inspection_controller.dart';
+import '../../upload/upload_queue.dart';
 
 /// Visibility into the background upload queue.
 ///
@@ -15,6 +16,22 @@ class UploadQueueScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final queue = InspectionScope.of(context).uploadQueue;
+    // Subscribe to the queue itself, not just the controller. InspectionScope
+    // is an InheritedNotifier over InspectionController, and the controller
+    // does not notify when the queue drains in the background — draining is
+    // driven by the queue's own timer, which touches no controller state.
+    // Without this the screen renders whatever the queue looked like when it
+    // was opened and never moves again: a task shown mid-retry stays mid-retry
+    // on screen long after it has landed. That is the one failure this screen
+    // cannot have, because its whole purpose is answering "has my morning
+    // actually reached the office" without having to trust that it did.
+    return ListenableBuilder(
+      listenable: queue,
+      builder: (context, _) => _buildBody(context, queue),
+    );
+  }
+
+  Widget _buildBody(BuildContext context, UploadQueue queue) {
     final theme = Theme.of(context);
     final tasks = queue.tasks.reversed.toList();
 

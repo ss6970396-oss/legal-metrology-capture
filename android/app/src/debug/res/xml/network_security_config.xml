@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only. This file lives under src/debug, so it is merged into
+  debug APKs and into nothing else: release builds keep Android's default,
+  where cleartext HTTP is refused outright.
+
+  It exists because the extraction backend runs as plain http:// on a
+  development laptop's LAN address, and since Android 9 (API 28) that traffic
+  is blocked by default with no visible error beyond a failed connection.
+
+  base-config rather than a domain-config entry for the laptop's address: that
+  address is a dart-define which changes with whatever network the laptop is
+  on (see UploadDestination), and a pinned domain list would have to be edited
+  in lockstep with it. The blanket permission is acceptable precisely because
+  it cannot reach a release build. Evidence leaving a real device still has to
+  go over TLS, and the day this app points at a deployed backend that is an
+  https:// URL with nothing here to change.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true"/>
+</network-security-config>
