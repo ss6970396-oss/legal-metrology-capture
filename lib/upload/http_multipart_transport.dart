@@ -61,7 +61,7 @@ class HttpMultipartUploadTransport implements UploadTransport {
       );
 
   @override
-  String get description => 'Extraction API → ${_endpoint('...')}';
+  String get description => 'Extraction API → $baseUri';
 
   Map<String, String> _headers({
     String? captureSessionId,
@@ -195,12 +195,25 @@ class HttpMultipartUploadTransport implements UploadTransport {
       return UploadSucceeded(serverReference: reference);
     }
 
-    // A conflict is what an idempotent retry looks like from the server side:
-    // the resource is already there because a previous attempt landed and the
-    // response never reached the device. That is a success for our purposes —
-    // the evidence is where it needs to be.
+    // 409 is *not* treated as a disguised success, though the idempotency
+    // contract makes that tempting. This backend satisfies idempotency in the
+    // 2xx range — a repeated capture-session post returns 201 with
+    // `already_existed` — and reserves 409 for the cases where the server and
+    // the device genuinely disagree: an artifact posted against a session the
+    // server has no record of, or an artifact ID already stored under a
+    // different hash. Reporting either as delivered would mark evidence
+    // uploaded that no one holds but this phone, which is the one failure this
+    // queue exists to prevent.
+    //
+    // It is permanent rather than retryable because the queue only attempts an
+    // artifact after its session task has succeeded; if the server still
+    // denies the session, waiting will not change that. The image stays on
+    // disk and the task stays visible for a person to deal with.
     if (status == 409) {
-      return const UploadSucceeded(serverReference: null);
+      return UploadPermanentlyFailed(
+        'The server rejected this as conflicting with what it already holds '
+        '(HTTP 409): ${_truncate(response.body, 200)}',
+      );
     }
 
     // Rate limiting and request timeouts are explicitly worth retrying even
